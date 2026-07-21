@@ -22,7 +22,8 @@ import time
 import argparse
 from dotenv import load_dotenv
 from twilio.rest import Client
-from sqlalchemy import create_engine, text
+
+import db as calldb
 
 load_dotenv()
 
@@ -30,28 +31,6 @@ TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 FROM_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
-DB_URL = os.environ.get("DATABASE_URL")
-
-DDL = """
-CREATE TABLE IF NOT EXISTS calls (
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    phone TEXT NOT NULL,
-    note TEXT,
-    call_sid TEXT,
-    status TEXT DEFAULT 'queued',
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-"""
-
-
-def db():
-    if not DB_URL:
-        return None
-    engine = create_engine(DB_URL)
-    with engine.begin() as conn:
-        conn.execute(text(DDL))
-    return engine
 
 
 def should_dial(phone: str) -> bool:
@@ -71,6 +50,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
     ap.add_argument("--max-concurrent", type=int, default=20)
+    ap.add_argument("--campaign", default="default", help="campaign label for the dashboard")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -81,8 +61,8 @@ def main():
                 raise SystemExit(f"Missing env var {k} (fill voice/.env)")
 
     client = None if args.dry_run else Client(TWILIO_SID, TWILIO_TOKEN)
-    engine = db()
     twiml_url = f"{BASE_URL}/twiml"
+    status_url = f"{BASE_URL}/status"
 
     active = 0
     for c in load_contacts(args.csv):
@@ -99,16 +79,16 @@ def main():
             time.sleep(1)
             active = max(0, active - 1)
 
-        call = client.calls.create(to=c["phone"], from_=FROM_NUMBER, url=twiml_url,
-                                   machine_detection="Enable")
+        call = client.calls.create(
+            to=c["phone"], from_=FROM_NUMBER, url=twiml_url,
+            machine_detection="Enable",
+            status_callback=status_url,
+            status_callback_event=["initiated", "answered", "completed"],
+            record=True,
+        )
         active += 1
         print(f"dialing {c['name']} {c['phone']} sid={call.sid}")
-        if engine:
-            with engine.begin() as conn:
-                conn.execute(text(
-                    "INSERT INTO calls (name, phone, note, call_sid, status) "
-                    "VALUES (:n,:p,:no,:s,'dialing')"),
-                    {"n": c["name"], "p": c["phone"], "no": c["note"], "s": call.sid})
+        calldb.record_dial(args.campaign, c["name"], c["phone"], c["note"], call.sid)
 
 
 if __name__ == "__main__":

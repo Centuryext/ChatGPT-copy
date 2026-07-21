@@ -64,6 +64,20 @@ python campaign.py sample_contacts.csv --max-concurrent 5
 ```
 Call connects → you hear the AI greet → talk to it. That recording is your Upwork demo.
 
+## Step 6 — Dashboard
+Live view of campaigns, outcomes, durations, recordings, and transcripts.
+```bash
+uvicorn dashboard:app --host 0.0.0.0 --port 8080
+# open http://localhost:8080  (auto-refreshes every 5s)
+```
+It reads the shared Postgres `calls` table that campaign.py writes to and that
+Twilio's status callbacks (POST /status on the voice server) keep updated.
+Requires Postgres running and `DATABASE_URL` set in `.env`:
+```bash
+# quick local Postgres via docker:
+docker run -d --name ccpg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16
+```
+
 ## Tuning / scaling
 - **Slow replies?** switch LLM to `meta-llama/Llama-3.1-8B-Instruct`, lower max_tokens.
 - **Robotic voice?** swap Kokoro for XTTS-v2 (voice cloning) in `tts_kokoro.py`.
