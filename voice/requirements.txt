@@ -1,0 +1,15 @@
+# Real-time voice pipeline (Python)
+pipecat-ai[silero,webrtc]==0.0.53
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+twilio==9.3.0
+python-dotenv==1.0.1
+# Local inference clients
+openai==1.51.0            # used as the OpenAI-compatible client pointed at your local vLLM
+faster-whisper==1.0.3     # local STT on GPU
+numpy==1.26.4
+# TTS: Kokoro (fast, streaming-friendly). Swap for XTTS if you prefer voice cloning.
+kokoro-onnx==0.3.6
+# Campaign runner / DB
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.35
