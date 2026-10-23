@@ -4,6 +4,9 @@ Run:  python -m roundtable.server
 MCP:  http://<host>:8787/mcp              with header  Authorization: Bearer <ROUNDTABLE_TOKEN>
       http://<host>:8787/key/<token>/mcp  for clients that cannot send headers
 UI:   http://<host>:8787/?token=<token>
+
+Tool parameter schemas are kept flat on purpose (no nested models, no nullable unions): some hosted MCP
+clients reject $ref or anyOf constructs. "Unset" is expressed as 0 for numbers and "" for strings.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
@@ -29,7 +32,8 @@ mcp = MCPServer(
     instructions=(
         "Shared desk for an options trading roundtable. Call roundtable_protocol once to learn the rules "
         "and roundtable_state at the start of every session to read the room. Authors are claude (strategist), "
-        "gpt (executor), critic (local model) and shawn (owner)."
+        "gpt (executor), critic (local model) and shawn (owner). Numeric parameters left at 0 and string "
+        "parameters left empty mean 'not set'."
     ),
 )
 
@@ -46,13 +50,12 @@ def _run(fn, *args, **kwargs) -> str:
             return f"Error: {e}"
 
 
-class Leg(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    side: str = Field(description="buy or sell")
-    option_type: str = Field(description="call or put")
-    strike: float = Field(description="Strike price, e.g. 105")
-    occ_symbol: str | None = Field(default=None, description="Optional OCC symbol, e.g. UAL261113C00105000")
-    rh_instrument_id: str | None = Field(default=None, description="Optional Robinhood option instrument UUID")
+def _num(v: float) -> float | None:
+    return None if v in (0, 0.0, None) else float(v)
+
+
+def _txt(v: str) -> str | None:
+    return v.strip() or None
 
 
 @mcp.tool(name="roundtable_protocol", annotations=READ)
@@ -71,12 +74,12 @@ def roundtable_state(limit_messages: int = Field(default=30, ge=1, le=200)) -> s
 @mcp.tool(name="roundtable_read_thread", annotations=READ)
 def roundtable_read_thread(
     limit: int = Field(default=50, ge=1, le=500),
-    since_id: int | None = Field(default=None, description="Only messages with id greater than this"),
-    ticket_id: str | None = Field(default=None, description="Only messages attached to this ticket, e.g. T-001"),
-    author: str | None = Field(default=None, description="Only messages from this author"),
+    since_id: int = Field(default=0, description="Only messages with id greater than this; 0 for all"),
+    ticket_id: str = Field(default="", description="Only messages attached to this ticket, e.g. T-001; empty for all"),
+    author: str = Field(default="", description="Only messages from this author; empty for all"),
 ) -> str:
     """Read the discussion thread in chronological order. Returns JSON list of {id, created_at, author, kind, ticket_id, text}."""
-    return _run(service.read_thread, limit, since_id, ticket_id, author)
+    return _run(service.read_thread, limit, since_id or None, _txt(ticket_id), _txt(author))
 
 
 @mcp.tool(name="roundtable_post_message", annotations=WRITE)
@@ -84,10 +87,10 @@ def roundtable_post_message(
     author: str = Field(description="Who is speaking: claude, gpt, critic or shawn"),
     text: str = Field(description="The message"),
     kind: str = Field(default="note", description="note | proposal | vote | decision | alert | critique | execution"),
-    ticket_id: str | None = Field(default=None, description="Attach to a ticket, e.g. T-001"),
+    ticket_id: str = Field(default="", description="Attach to a ticket, e.g. T-001; empty for none"),
 ) -> str:
     """Post a message to the thread. Use kind=vote for agree/disagree, decision for calls, alert for urgent risks."""
-    return _run(service.post_message, author, text, kind, ticket_id)
+    return _run(service.post_message, author, text, kind, _txt(ticket_id))
 
 
 @mcp.tool(name="roundtable_create_ticket", annotations=WRITE)
@@ -98,17 +101,18 @@ def roundtable_create_ticket(
     direction: str = Field(description="bearish | bullish | neutral"),
     entry_type: str = Field(description="credit (you receive the net) or debit (you pay the net)"),
     expiry: str = Field(description="YYYY-MM-DD"),
-    legs: list[Leg] = Field(description="Legs in order; a vertical spread has two"),
+    legs: list[dict[str, Any]] = Field(description="Legs in order, each {side: buy|sell, option_type: call|put, strike: number, "
+                                                   "occ_symbol?: string, rh_instrument_id?: string}. A vertical spread has two."),
     contracts: int = Field(ge=1, description="Number of spreads (each leg fills this many contracts)"),
     limit_price: float = Field(gt=0, description="Net limit per share for the whole spread, positive"),
-    fallback_price: float | None = Field(default=None, description="Second try if the first limit does not fill"),
-    floor_price: float | None = Field(default=None, description="Worst acceptable net; never go past this"),
-    breakeven_px: float | None = Field(default=None),
-    profit_target_usd: float | None = Field(default=None, description="Close when unrealized P&L reaches this"),
-    stop_loss_usd: float | None = Field(default=None, description="Negative number; close when P&L falls to this"),
-    max_loss_usd: float | None = Field(default=None, description="Computed for 2-leg verticals if omitted"),
-    max_gain_usd: float | None = Field(default=None, description="Computed for 2-leg verticals if omitted"),
-    underlying_px: float | None = Field(default=None, description="Stock price when the ticket was written"),
+    fallback_price: float = Field(default=0, description="Second try if the first limit does not fill; 0 for none"),
+    floor_price: float = Field(default=0, description="Worst acceptable net; never go past this; 0 for none"),
+    breakeven_px: float = Field(default=0, description="Breakeven stock price at expiry; 0 for unknown"),
+    profit_target_usd: float = Field(default=0, description="Close when unrealized P&L reaches this; 0 for none"),
+    stop_loss_usd: float = Field(default=0, description="Negative number; close when P&L falls to this; 0 for none"),
+    max_loss_usd: float = Field(default=0, description="0 to compute automatically for 2-leg verticals"),
+    max_gain_usd: float = Field(default=0, description="0 to compute automatically for 2-leg verticals"),
+    underlying_px: float = Field(default=0, description="Stock price when the ticket was written; 0 for unknown"),
     exit_rules: str = Field(default="", description="Plain-English exit plan"),
     rationale: str = Field(default="", description="Why this trade, with the evidence"),
     thesis_tag: str = Field(default="", description="Groups trades by thesis, e.g. airline_fuel_cost_2026Q4"),
@@ -119,22 +123,22 @@ def roundtable_create_ticket(
     """Create a trade ticket (one row per strategy-level trade). Returns the ticket as JSON including its id."""
     data = dict(
         underlying=underlying, strategy=strategy, direction=direction, entry_type=entry_type, expiry=expiry,
-        legs=[l.model_dump(exclude_none=True) for l in legs], contracts=contracts, limit_price=limit_price,
-        fallback_price=fallback_price, floor_price=floor_price, breakeven_px=breakeven_px,
-        profit_target_usd=profit_target_usd, stop_loss_usd=stop_loss_usd, max_loss_usd=max_loss_usd,
-        max_gain_usd=max_gain_usd, underlying_px=underlying_px, exit_rules=exit_rules, rationale=rationale,
-        thesis_tag=thesis_tag, catalyst=catalyst, status=status, notes=notes,
+        legs=legs, contracts=contracts, limit_price=limit_price,
+        fallback_price=_num(fallback_price), floor_price=_num(floor_price), breakeven_px=_num(breakeven_px),
+        profit_target_usd=_num(profit_target_usd), stop_loss_usd=_num(stop_loss_usd),
+        max_loss_usd=_num(max_loss_usd), max_gain_usd=_num(max_gain_usd), underlying_px=_num(underlying_px),
+        exit_rules=exit_rules, rationale=rationale, thesis_tag=thesis_tag, catalyst=catalyst, status=status, notes=notes,
     )
     return _run(service.create_ticket, author, data)
 
 
 @mcp.tool(name="roundtable_list_tickets", annotations=READ)
 def roundtable_list_tickets(
-    status: str | None = Field(default=None, description="Comma-separated filter, e.g. ready,close_ready. Omit for all."),
+    status: str = Field(default="", description="Comma-separated filter, e.g. ready,close_ready. Empty for all."),
     limit: int = Field(default=50, ge=1, le=500),
 ) -> str:
     """List tickets newest first, optionally filtered by status."""
-    return _run(service.list_tickets, status, limit)
+    return _run(service.list_tickets, _txt(status), limit)
 
 
 @mcp.tool(name="roundtable_get_ticket", annotations=READ)
@@ -150,7 +154,7 @@ def roundtable_set_status(
     ticket_id: str = Field(description="e.g. T-001"),
     author: str = Field(description="Who decides"),
     status: str = Field(description="proposed | ready | placed | close_ready | rejected | cancelled | expired"),
-    reason: str = Field(default="", description="Why, in one line"),
+    reason: str = Field(default="", description="Why, in one line (for placed: the Robinhood order id)"),
 ) -> str:
     """Move a ticket along its lifecycle. open and closed are set by roundtable_record_execution, not here.
     gpt sets placed right after submitting an order to Robinhood."""
@@ -165,15 +169,15 @@ def roundtable_record_execution(
     order_id: str = Field(description="Robinhood order UUID"),
     filled_at: str = Field(description="Fill time in ISO 8601 UTC, e.g. 2026-10-23T17:05:12Z"),
     net_price: float = Field(ge=0, description="Net per share for the whole spread, positive (0 if expired worthless)"),
-    fees_usd: float = Field(default=0.0, ge=0),
-    leg_prices: list[float] | None = Field(default=None, description="Per-leg fill prices in ticket leg order"),
-    underlying_px: float | None = Field(default=None, description="Stock price at the fill"),
+    fees_usd: float = Field(default=0, ge=0),
+    leg_prices: list[float] = Field(default=[], description="Per-leg fill prices in ticket leg order; empty if unknown"),
+    underlying_px: float = Field(default=0, description="Stock price at the fill; 0 for unknown"),
     close_reason: str = Field(default="", description="exit only: profit_target | stop_loss | expiry | manual"),
 ) -> str:
     """Record a filled order. phase=entry moves the ticket to open; phase=exit moves it to closed and computes P&L.
     This is the trade dataset: every fill must be recorded here."""
     return _run(service.record_execution, ticket_id, author, phase, order_id, filled_at, net_price, fees_usd,
-                leg_prices, underlying_px, close_reason)
+                leg_prices or None, _num(underlying_px), close_reason)
 
 
 @mcp.tool(name="roundtable_update_ticket", annotations=WRITE)
@@ -190,7 +194,7 @@ def roundtable_update_ticket(
 def roundtable_record_snapshot(
     author: str = Field(description="Who captured it"),
     kind: str = Field(description="quotes | positions | portfolio | pnl | orders | other"),
-    payload: dict[str, Any] | list[Any] = Field(description="The data as JSON (quotes, positions, greeks...)"),
+    payload: dict[str, Any] = Field(description="The data as a JSON object (quotes, positions, greeks...); wrap a list as {\"items\": [...]}"),
     note: str = Field(default="", description="What this is and when it was pulled"),
 ) -> str:
     """Store a market or account snapshot for the dataset (option quotes with greeks, positions, buying power)."""
@@ -199,12 +203,12 @@ def roundtable_record_snapshot(
 
 @mcp.tool(name="roundtable_list_snapshots", annotations=READ)
 def roundtable_list_snapshots(
-    kind: str | None = Field(default=None),
+    kind: str = Field(default="", description="Filter by kind; empty for all"),
     limit: int = Field(default=20, ge=1, le=200),
     with_payload: bool = Field(default=False, description="Include the stored JSON (can be large)"),
 ) -> str:
     """List stored snapshots newest first."""
-    return _run(service.list_snapshots, kind, limit, with_payload)
+    return _run(service.list_snapshots, _txt(kind), limit, with_payload)
 
 
 @mcp.tool(name="roundtable_pnl_summary", annotations=READ)
@@ -294,7 +298,9 @@ async def api_export(request: Request) -> Response:
 class TokenAuth:
     """ASGI wrapper. Accepts `Authorization: Bearer <token>` or a `/key/<token>/...` path prefix.
     Strips an optional base path (ROUNDTABLE_BASE_PATH) left by a reverse proxy.
-    The board page itself (/) and /health are public; everything else needs the token."""
+    The board page itself (/) and /health are public; everything else needs the token.
+    GET on the MCP endpoint answers 405 at once (stateless server: there is no event stream to open),
+    and OAuth discovery paths answer 404 so clients know there is no login flow."""
 
     PUBLIC = {"/", "/health"}
 
@@ -304,11 +310,17 @@ class TokenAuth:
         self.base_path = base_path.rstrip("/")
         self.prefix = f"/{token_segment}/{token}"
 
-    def _rewrite(self, scope, new_path: str):
+    @staticmethod
+    def _rewrite(scope, new_path: str):
         scope = dict(scope)
         scope["path"] = new_path or "/"
         scope["raw_path"] = (new_path or "/").encode()
         return scope
+
+    @staticmethod
+    async def _reply(scope, receive, send, status: int, body: dict):
+        response = JSONResponse(body, status_code=status)
+        await response(scope, receive, send)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -317,17 +329,26 @@ class TokenAuth:
         if self.base_path and (path == self.base_path or path.startswith(self.base_path + "/")):
             path = path[len(self.base_path):] or "/"
             scope = self._rewrite(scope, path)
+        if path.startswith("/.well-known/"):
+            return await self._reply(scope, receive, send, 404, {"error": "no OAuth here; the token is the credential"})
+        authed = False
         if path == self.prefix or path.startswith(self.prefix + "/"):
-            return await self.app(self._rewrite(scope, path[len(self.prefix):]), receive, send)
-        if path in self.PUBLIC:
+            path = path[len(self.prefix):] or "/"
+            scope = self._rewrite(scope, path)
+            authed = True
+        if path == "/mcp/":
+            path = "/mcp"
+            scope = self._rewrite(scope, path)
+        if path == "/mcp" and scope.get("method") == "GET":
+            return await self._reply(scope, receive, send, 405, {"error": "MCP endpoint: POST JSON-RPC here (stateless streamable HTTP)"})
+        if authed or path in self.PUBLIC:
             return await self.app(scope, receive, send)
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         auth = headers.get("authorization", "")
         if auth.lower().startswith("bearer ") and auth[7:].strip() == self.token:
             return await self.app(scope, receive, send)
-        response = JSONResponse({"error": "unauthorized: send Authorization: Bearer <ROUNDTABLE_TOKEN> or use /key/<token>/..."},
-                                status_code=401)
-        return await response(scope, receive, send)
+        return await self._reply(scope, receive, send, 401,
+                                 {"error": "unauthorized: send Authorization: Bearer <ROUNDTABLE_TOKEN> or use /key/<token>/..."})
 
 
 def build_app():
