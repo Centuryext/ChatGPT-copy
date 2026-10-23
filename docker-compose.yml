@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: roundtable-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: roundtable
+      POSTGRES_USER: roundtable
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-roundtable}
+    volumes:
+      - roundtable-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roundtable -d roundtable"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  roundtable:
+    build: .
+    container_name: roundtable
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://roundtable:${POSTGRES_PASSWORD:-roundtable}@db:5432/roundtable}
+      ROUNDTABLE_HOST: 0.0.0.0
+      ROUNDTABLE_PORT: "8787"
+    ports:
+      - "${ROUNDTABLE_BIND:-0.0.0.0}:8787:8787"
+
+  # The local-model seat. Opt in with:  docker compose --profile critic up -d
+  critic:
+    build: .
+    container_name: roundtable-critic
+    restart: unless-stopped
+    profiles: ["critic"]
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://roundtable:${POSTGRES_PASSWORD:-roundtable}@db:5432/roundtable}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-gemma4:12b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "roundtable.critic"]
+
+volumes:
+  roundtable-pg:
