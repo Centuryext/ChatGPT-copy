@@ -48,5 +48,31 @@ services:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "roundtable.critic"]
 
+  # PaperDesk: fake broker + trainer. Opt in with:  docker compose --profile paper ...
+  paperdesk:
+    build: ./paperdesk
+    container_name: paperdesk
+    profiles: ["paper"]
+    environment:
+      PAPERDESK_PORT: "8899"
+    ports:
+      - "127.0.0.1:8899:8899"
+    volumes:
+      - ./paperdesk/runs:/app/runs
+
+  trainer:
+    build: ./paperdesk
+    container_name: paperdesk-trainer
+    profiles: ["paper"]
+    environment:
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./paperdesk/runs:/app/runs
+      - ./paperdesk/system_prompt.txt:/app/system_prompt.txt
+      - ./paperdesk/scenarios:/app/scenarios
+    entrypoint: ["python", "harness.py"]
+
 volumes:
   roundtable-pg:

@@ -1,0 +1,24 @@
+{
+ "id": "T-001",
+ "underlying": "UAL",
+ "strategy": "bear_call_credit_spread",
+ "expiry": "2026-11-13",
+ "contracts": 2,
+ "limit_price": 0.95,
+ "fallback_price": 0.9,
+ "floor_price": 0.85,
+ "legs": [
+  {
+   "side": "sell",
+   "option_type": "call",
+   "strike": 105.0,
+   "occ_symbol": "UAL261113C00105000"
+  },
+  {
+   "side": "buy",
+   "option_type": "call",
+   "strike": 110.0,
+   "occ_symbol": "UAL261113C00110000"
+  }
+ ]
+}
